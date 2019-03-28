@@ -1,0 +1,201 @@
+library(shiny)
+library(shinydashboard)
+library(raster)
+library(shiny)
+library("quantmod")
+library("tseries")
+library("zoo")
+library("forecast")
+library("PerformanceAnalytics")
+library(ggplot2)
+library(leaflet)
+library(DiceKriging)
+
+ui <- dashboardPage(
+  dashboardHeader(title = "Water quality data"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Statistica Descrittiva", tabName = "Statistica_descrittiva", icon = icon("dashboard")),
+      menuItem("Kriging", tabName = "Kriging", icon = icon("th"))
+    )
+  ),
+  ## Body content
+  dashboardBody(
+    tabItems(
+      # First tab content
+      tabItem(tabName = "Statistica_descrittiva",
+              fluidRow( box (width= 12, aling = "center",
+                  title="Grafico Mensile",
+                  selectInput("Month","Select the month", c("giu 2018","lug 2018","ago 2018")),
+                  #Devo scegliere il sensore 
+                  selectInput("Sensor","Select the sensor", c("1104370","1104405","1104420"))
+              )),
+              fluidRow( box (width=12,  align = "center", 
+                             plotOutput("CloridePlot")))
+              
+      ),
+      
+      # Second tab content
+      tabItem(tabName = "Kriging",
+              fluidRow(
+              selectInput("SensorK1","Select the sensor", c("1104370","1104405","1104420")),
+              selectInput("SensorK2","Select the sensor", c("1104370","1104405","1104420")),
+            box(plotOutput("KrigingPlot"))
+              )
+      )
+    )
+  )
+)
+
+
+
+############################ S E R V E R ######################################
+server <- function(input, output) {
+  
+  #Prendo in ingresso un dataset 
+  a<-read.table('/Users/Nicholas Ciranna/Desktop/STAGE/Dataset.txt', 
+                header = TRUE, 
+                sep = "\t"
+                )
+  
+  #Assegnamento
+  df=data.frame(a[2],
+                a[3],
+                a[5],
+                a[7],
+                a[8]
+                )
+  
+  #Do Il nome ad ogni colonna
+  colnames(df)=c("NumSensor",
+                 "Date_Hour",
+                 "Cloride",
+                 "Latitudine",
+                 "Longitudine"
+                 )
+  
+  dfn=data.frame(
+        x=numeric(), 
+        y=character(), 
+        z=numeric(), 
+        l=numeric(),
+        n=numeric()
+        )
+  
+  
+  for (i in 1:length(df[,3]))
+    {
+    #PULIZIA DATASET DA RECORD PROBABILMENTE ERRATI 
+    if((df[i,3]>=80 
+        & df[i,3]<=250)){
+          dfn=rbind(dfn,(df[i,]))
+    }
+  }
+  
+  dfn[, "Date_Hour"] <- sapply(
+                  dfn[, "Date_Hour"], 
+                  as.character)
+  
+  for (i in 1:length(dfn[,1])){
+    x=unlist(strsplit(dfn[i,2], " "))
+    temp=as.Date.character(x[1], format="%d/%m/%Y")
+    temp=as.yearmon(temp)
+    dfn[i,2]=as.character(temp)
+  }
+  plotMonth=data.frame(sensor=numeric(), 
+                       date=character(), 
+                       value=numeric(), 
+                       x=numeric(), 
+                       y=numeric()
+                       )
+  
+  output$CloridePlot<-renderPlot({
+
+    for(h in 1:length(dfn[,1])){
+      if(as.character(input$Month)==dfn[h,2] & 
+         as.character(input$Sensor)==dfn[h,1])
+        
+              plotMonth=rbind(plotMonth,dfn[h,])
+    }
+    
+    qplot(plotMonth[,3], main=paste("Grafico del sensore: ",
+                                    as.character(input$Sensor), #Reattività
+                                    "per il mese di: ",
+                                    as.character(input$Month) #Reattività
+                                    ),
+         ylab=paste(as.character(input$Month), 
+                    "Collected data"),
+                    xlab="Value of cloride", 
+                    color="black", fill="red", 
+                    show.legend=F)
+        })
+  
+  output$KrigingPlot<-RenderPlot({
+    #Trasformo in matrix per avere solo interi
+    dfn <- data.matrix(dfn) 
+    #Riporto in dataFrame, avro quindi un DF con 
+    #tutte le colonne in formato intero 
+    dfn <- data.frame(dfn)
+    
+    #Creo un oggetto di SpatialPointsDataFrame 
+    #andando ad indicare quali colonne rappresentano le coordinate
+    coordinates(dfn) <- ~ Latitudine +
+                          Longitudine
+    
+    #Per il Kriging devo creare una griglia di supporto 
+    griddf <- expand.grid(latcoords = 
+                            seq(from = dfn@coords.nrs),
+                          lngcoords = 
+                            seq(from = dfn@coords.nrs)
+                          )
+    
+    plot1 <- dfn %>% 
+             as.data.frame %>%
+             ggplot(aes(Latitudine,
+                        Longitudine)
+                    ) +
+             geom_point(size=1) +
+             coord_equal() + 
+             ggtitle("Punti con valore")
+    
+    plot2 <- griddf %>% 
+             as.data.frame %>%
+             ggplot(aes(latcoords,
+                        lngcoords)) + 
+             geom_point(size=1) + 
+             coord_equal() + 
+             ggtitle("Points da stimare")
+    
+    #Creo il variogramma 
+    cld.vgm <- variogram(log(Cloride)~1, 
+                         dfn) 
+    #Adatto un modello al variogramma
+    cld.fit <- fit.variogram(lzn.vgm, 
+                             model=vgm(7, "Sph", 250, 1))
+    
+    coordinates(griddf) <- ~ latcoords + 
+                             lngcoords 
+    
+    cld.kriged <- krige(log(Cloride) ~ 1, 
+                        dfn, 
+                        grddf, 
+                        model=cld.fit
+                        )
+    
+    #Stampo plot finale utilizzando GGPLOT2 
+    cld.kriged %>% as.data.frame %>%
+                   ggplot(aes(x=x, y=y)) +
+                   geom_tile(aes(fill=var1.pred)) + 
+                   coord_equal() +
+                   scale_fill_gradient(low = "yellow", 
+                                       high="red") +
+                   scale_x_continuous(labels=comma) + 
+                                      scale_y_continuous(labels=comma) +
+                                      theme_bw()
+             })
+    }
+
+shinyApp(ui=ui, 
+         server=server, 
+         options = list(height = 1080)
+         )
